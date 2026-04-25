@@ -88,7 +88,7 @@ void can_init(can_data_t *channel, CAN_TypeDef *instance)
 
 void can_set_bittiming(can_data_t *channel, const struct gs_device_bittiming *timing)
 {
-	const uint8_t tseg1 = timing->prop_seg + timing->phase_seg1;
+	const uint32_t tseg1 = timing->prop_seg + timing->phase_seg1;
 
 	channel->brp = timing->brp;
 	channel->phase_seg1 = tseg1;
