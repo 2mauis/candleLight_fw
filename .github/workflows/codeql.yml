@@ -1,4 +1,4 @@
-name: CodeQL
+name: CodeQL Security Analysis
 
 on:
   push:
@@ -38,7 +38,7 @@ jobs:
 
       - name: Build
         env:
-          MAKEFLAGS: "-j"
+          MAKEFLAGS: "-j2"
         run: cmake --build build --config Release
 
       - name: Perform CodeQL Analysis
