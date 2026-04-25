@@ -30,28 +30,11 @@ THE SOFTWARE.
 
 #include "compiler.h"
 
-#define u32				   uint32_t
-#define u8				   uint8_t
+#define u32										uint32_t
+#define u8										uint8_t
 
-#define GSUSB_ENDPOINT_IN  0x81
-#define GSUSB_ENDPOINT_OUT 0x02
-
-
-#define GS_CAN_MODE_NORMAL		  0
-#define GS_CAN_MODE_LISTEN_ONLY	  (1<<0)
-#define GS_CAN_MODE_LOOP_BACK	  (1<<1)
-#define GS_CAN_MODE_TRIPLE_SAMPLE (1<<2)
-#define GS_CAN_MODE_ONE_SHOT	  (1<<3)
-#define GS_CAN_MODE_HW_TIMESTAMP  (1<<4)
-/* #define GS_CAN_FEATURE_IDENTIFY              (1<<5) */
-/* #define GS_CAN_FEATURE_USER_ID               (1<<6) */
-#define GS_CAN_MODE_PAD_PKTS_TO_MAX_PKT_SIZE (1<<7)
-#define GS_CAN_MODE_FD						 (1<<8)    /* switch device to CAN-FD mode */
-/* #define GS_CAN_FEATURE_REQ_USB_QUIRK_LPC546XX (1<<9) */
-/* #define GS_CAN_FEATURE_BT_CONST_EXT          (1<<10) */
-/* #define GS_CAN_FEATURE_TERMINATION           (1<<11) */
-#define GS_CAN_MODE_BERR_REPORTING (1<<12)
-/* GS_CAN_FEATURE_GET_STATE (1<<13) */
+#define GSUSB_ENDPOINT_IN						0x81
+#define GSUSB_ENDPOINT_OUT						0x02
 
 #define GS_CAN_FEATURE_LISTEN_ONLY				(1<<0)
 #define GS_CAN_FEATURE_LOOP_BACK				(1<<1)
@@ -79,6 +62,15 @@ THE SOFTWARE.
 #define GS_CAN_FEATURE_TERMINATION				(1<<11)
 #define GS_CAN_FEATURE_BERR_REPORTING			(1<<12)
 #define GS_CAN_FEATURE_GET_STATE				(1<<13)
+#define GS_CAN_FEATURE_ELM_PROTOCOL				(1<<14)
+#define GS_CAN_FEATURE_ELM_DISABLE_TX_ECHO		(1<<15)
+/* device supports HW filter, see:
+ * - GS_USB_BREQ_SET_FILTER,
+ * - GS_USB_BREQ_GET_FILTER,
+ * - struct gs_device_filter_info
+ * - struct gs_device_filter
+ */
+#define GS_CAN_FEATURE_FILTER					(1<<16)
 
 #define GS_CAN_FLAG_OVERFLOW					(1<<0)
 #define GS_CAN_FLAG_FD							(1<<1) /* is a CAN-FD frame */
@@ -181,6 +173,17 @@ enum gs_usb_breq {
 	GS_USB_BREQ_SET_TERMINATION,
 	GS_USB_BREQ_GET_TERMINATION,
 	GS_USB_BREQ_GET_STATE,
+	GS_USB_BREQ_SET_FILTER,
+	GS_USB_BREQ_GET_FILTER,
+	__GS_USB_BREQ_PLACEHOLDER_17,
+	__GS_USB_BREQ_PLACEHOLDER_18,
+	__GS_USB_BREQ_PLACEHOLDER_19,
+	GS_USB_BREQ_ELM_GET_BOARDINFO = 20,
+	GS_USB_BREQ_ELM_SET_FILTER,
+	GS_USB_BREQ_ELM_GET_LASTERROR,
+	GS_USB_BREQ_ELM_SET_BUSLOADREPORT,
+	GS_USB_BREQ_ELM_SET_PINSTATUS,
+	GS_USB_BREQ_ELM_GET_PINSTATUS,
 };
 
 enum gs_can_mode {
@@ -200,9 +203,13 @@ enum gs_can_state {
 };
 
 enum gs_can_termination_state {
-	GS_CAN_TERMINATION_UNSUPPORTED = -1,    // private, not in kernel enum
 	GS_CAN_TERMINATION_STATE_OFF = 0,
 	GS_CAN_TERMINATION_STATE_ON,
+	GS_CAN_TERMINATION_UNSUPPORTED = 0xffffffff,    // private, not in kernel enum
+};
+
+enum gs_device_filter_dev {
+	GS_DEVICE_FILTER_DEV_BXCAN = 1,         // bxcan, 14 filters
 };
 
 /* data types passed between host and device */
@@ -230,7 +237,7 @@ struct gs_device_config {
 
 struct gs_device_mode {
 	u32 mode;
-	u32 flags;
+	u32 feature;
 } __packed __aligned(4);
 
 struct gs_device_state {
@@ -277,6 +284,27 @@ struct gs_identify_mode {
 
 struct gs_device_termination_state {
 	u32 state;
+} __packed __aligned(4);
+
+struct gs_device_filter_info {
+	u8 dev;         // enum gs_device_filter_dev
+	u8 reserved[3];
+}  __packed __aligned(4);
+
+struct gs_device_filter_bxcan {
+	u32 fs1r;
+	u32 fm1r;
+	u32 ffa1r;
+	u32 fa1r;
+	u32 fr1[14];
+	u32 fr2[14];
+} __packed __aligned(4);
+
+struct gs_device_filter {
+	struct gs_device_filter_info info;
+	union {
+		struct gs_device_filter_bxcan bxcan;
+	};
 } __packed __aligned(4);
 
 struct classic_can {

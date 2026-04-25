@@ -32,6 +32,7 @@ THE SOFTWARE.
 #include "can.h"
 #include "compiler.h"
 #include "config.h"
+#include "dfu.h"
 #include "gs_usb.h"
 #include "led.h"
 #include "list.h"
@@ -39,12 +40,6 @@ THE SOFTWARE.
 
 /* Define these here so they can be referenced in other files */
 
-#define GS_CAN_EP0_BUF_SIZE \
-		max5(sizeof(struct gs_host_config), \
-			 sizeof(struct gs_device_bittiming), \
-			 sizeof(struct gs_device_mode), \
-			 sizeof(struct gs_identify_mode), \
-			 sizeof(struct gs_device_termination_state))
 #ifdef CONFIG_CANFD
 #define CAN_DATA_MAX_PACKET_SIZE 64    /* Endpoint IN & OUT Packet size */
 #else
@@ -63,6 +58,15 @@ extern USBD_ClassTypeDef USBD_GS_CAN;
 #define GS_HOST_FRAME_SIZE struct_size((struct gs_host_frame *)NULL, classic_can_ts, 1)
 #endif
 
+// When using double buffer for RX, this needs to be at least 2 to
+// ensure there is always an RX buffer ready to receive the
+// RX frames.
+#if defined(USB) || defined(USB_DRD_FS)
+#define USBD_GS_CAN_RX_BUFFER_COUNT 2
+#else
+#define USBD_GS_CAN_RX_BUFFER_COUNT 1
+#endif
+
 struct gs_host_frame_object {
 	struct list_head list;
 	union {
@@ -72,26 +76,40 @@ struct gs_host_frame_object {
 };
 
 typedef struct {
-	uint8_t __aligned(4) ep0_buf[GS_CAN_EP0_BUF_SIZE];
+	union ep0 {
+		struct_group_tagged(ep0_data, data, union {
+			// Device -> Host
+			struct dfu_status dfu_status;
+
+			// Host -> Device
+			const struct gs_host_config config;
+			const struct gs_device_bittiming bittiming;
+			const struct gs_device_mode mode;
+			const struct gs_identify_mode identify_mode;
+			const struct gs_device_filter filter;
+
+			// Device <-> Host
+			struct gs_device_termination_state term_state;
+		}; );
+		uint8_t __aligned(4) buf[sizeof(struct ep0_data)];
+	} ep0;
 
 	USBD_SetupReqTypedef last_setup_request;
 
 	struct list_head list_frame_pool;
 	struct list_head list_to_host;
 
-	struct gs_host_frame_object *from_host_buf;
+	struct gs_host_frame_object *from_host_buf[USBD_GS_CAN_RX_BUFFER_COUNT];
 	struct gs_host_frame_object *to_host_buf;
 
 	can_data_t channels[NUM_CAN_CHANNEL];
 
-	bool dfu_detach_requested;
-
-	bool timestamps_enabled;
+	uint32_t feature;
 	uint32_t sof_timestamp_us;
 
-	bool pad_pkts_to_max_pkt_size;
-
 	struct gs_host_frame_object msgbuf[CAN_QUEUE_SIZE];
+
+	bool dfu_detach_requested;
 } USBD_GS_CAN_HandleTypeDef __attribute__ ((aligned (4)));
 
 #if defined(STM32F0)

@@ -2,20 +2,30 @@ cmake_minimum_required(VERSION 3.13)
 project(candleLightFirmware C ASM)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(default_build_type "Release")
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    message(STATUS "Setting build type to '${default_build_type}' as none was specified.")
+    set(CMAKE_BUILD_TYPE "${default_build_type}" CACHE STRING "Choose the type of build." FORCE)
+
+    # Set the possible values for cmake-gui drop-down
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release")
+endif()
 
 add_compile_options(
+	$<$<CONFIG:Debug>:-O2>
+	$<$<CONFIG:Release>:-O3>
+	$<$<CONFIG:Release>:-flto>
+	$<$<CONFIG:Release>:-fno-fat-lto-objects>
 	--specs=nano.specs
 	--specs=nosys.specs
-	-O2
 	-Wall
 	-Werror
 	-Wextra
 	-Wstrict-prototypes
 	-fdata-sections
-	-ffat-lto-objects
 	-ffreestanding
 	-ffunction-sections
-	-flto
 	-fmessage-length=0
 	-fsigned-char
 	-g3
@@ -29,6 +39,7 @@ set(CPUFLAGS_F4 -mcpu=cortex-m4)
 set(CPUFLAGS_G0 -mcpu=cortex-m0)
 
 add_link_options(
+	$<$<CONFIG:Release>:-flto>
 	--specs=nano.specs
 	--specs=nosys.specs
 	-Wall
@@ -65,6 +76,7 @@ set(
 	include/usbd_gs_can.h src/usbd_gs_can.c
 	src/usbd_conf.c
 
+	include/board.h
 	include/can.h
 	include/can_common.h src/can_common.c
 	include/device.h
@@ -111,7 +123,7 @@ find_package(DFUSuffix)
 function(dfu_flash target)
 	if (DFU_SUFFIX_EXECUTABLE)
 		add_custom_command(TARGET ${target}
-			DEPENDS ${target}
+			POST_BUILD
 			BYPRODUCTS ${target}.dfu
 			COMMAND ${CMAKE_OBJCOPY} -O binary ${target} ${target}.dfu
 			COMMAND ${DFU_SUFFIX_EXECUTABLE} --add ${target}.dfu --vid 1d50 --pid 606f 1>/dev/null
@@ -212,6 +224,9 @@ function(add_target_common TGTNAME CPU_FAMILY)
 	add_dependencies(${TGTNAME}_fw version_h)
 	target_include_directories(${TGTNAME}_fw PRIVATE include/ ${CMAKE_CURRENT_BINARY_DIR})
 	target_link_options(${TGTNAME}_fw PRIVATE -T ${CPU_FAMILY}_processed.ld LINKER:-Map=${TGTNAME}_fw.map)
+	set_target_properties(${TGTNAME}_fw PROPERTIES
+		ADDITIONAL_CLEAN_FILES "${TGTNAME}_fw.map"
+	)
 	make_bin_file(${TGTNAME}_fw)
 	dfu_flash(${TGTNAME}_fw)
 	show_object_size(${TGTNAME}_fw)
@@ -220,7 +235,8 @@ endfunction()
 function(add_f042_target TGTNAME)
 	add_target_common(${TGTNAME} STM32F042X6)
 	target_compile_options(${TGTNAME}_fw BEFORE PRIVATE ${CPUFLAGS_F0})
-	target_compile_definitions(${TGTNAME}_fw PRIVATE BOARD_${TGTNAME} STM32F0)
+	target_compile_definitions(${TGTNAME}_fw PRIVATE BOARD_${TGTNAME} STM32F0 CONFIG_BXCAN)
+	target_sources(${TGTNAME}_fw PRIVATE "src/boards/legacy.c")
 	target_sources(${TGTNAME}_fw PRIVATE "src/can/bxcan.c")
 	target_sources(${TGTNAME}_fw PRIVATE "src/device/device_f0.c")
 	target_link_options(${TGTNAME}_fw BEFORE PRIVATE ${CPUFLAGS_F0})
@@ -230,7 +246,8 @@ endfunction()
 function(add_f072_target TGTNAME)
 	add_target_common(${TGTNAME} STM32F072XB)
 	target_compile_options(${TGTNAME}_fw BEFORE PRIVATE ${CPUFLAGS_F0})
-	target_compile_definitions(${TGTNAME}_fw PRIVATE BOARD_${TGTNAME} STM32F0)
+	target_compile_definitions(${TGTNAME}_fw PRIVATE BOARD_${TGTNAME} STM32F0 CONFIG_BXCAN)
+	target_sources(${TGTNAME}_fw PRIVATE "src/boards/legacy.c")
 	target_sources(${TGTNAME}_fw PRIVATE "src/can/bxcan.c")
 	target_sources(${TGTNAME}_fw PRIVATE "src/device/device_f0.c")
 	target_link_options(${TGTNAME}_fw BEFORE PRIVATE ${CPUFLAGS_F0})
@@ -239,8 +256,9 @@ endfunction()
 
 function(add_f407_target TGTNAME)
 	add_target_common(${TGTNAME} STM32F407XE)
-	target_compile_definitions(${TGTNAME}_fw PRIVATE BOARD_${TGTNAME} STM32F4)
+	target_compile_definitions(${TGTNAME}_fw PRIVATE BOARD_${TGTNAME} STM32F4 CONFIG_BXCAN)
 	target_compile_options(${TGTNAME}_fw BEFORE PRIVATE ${CPUFLAGS_F4})
+	target_sources(${TGTNAME}_fw PRIVATE "src/boards/legacy.c")
 	target_sources(${TGTNAME}_fw PRIVATE "src/can/bxcan.c")
 	target_sources(${TGTNAME}_fw PRIVATE "src/device/device_f4.c")
 	target_link_options(${TGTNAME}_fw BEFORE PRIVATE ${CPUFLAGS_F4})
@@ -249,7 +267,7 @@ endfunction()
 
 function(add_g0b1_target TGTNAME)
 	add_target_common(${TGTNAME} STM32G0B1xx)
-	target_compile_definitions(${TGTNAME}_fw PRIVATE BOARD_${TGTNAME} STM32G0)
+	target_compile_definitions(${TGTNAME}_fw PRIVATE BOARD_${TGTNAME} STM32G0 CONFIG_M_CAN)
 	target_compile_options(${TGTNAME}_fw BEFORE PRIVATE ${CPUFLAGS_G0})
 	target_sources(${TGTNAME}_fw PRIVATE "src/device/device_g0.c")
 	target_link_options(${TGTNAME}_fw BEFORE PRIVATE ${CPUFLAGS_G0})
@@ -258,10 +276,29 @@ endfunction()
 
 ########## generate list of targets.
 # the "_fw" part is appended automatically
-set(TGTF042_LIST "cantact" "canalyze" "canable" "usb2can" "cannette")
-set(TGTF072_LIST "candleLight" "CANable_MKS" "CONVERTDEVICE_xCAN" "DSD_TECH_SH_C30A" "FYSETC_UCAN")
-set(TGTF407_LIST "STM32F4_DevBoard")
-set(TGTG0B1_LIST "budgetcan" "CONVERTDEVICE_xCANFD")
+set(TGTF042_LIST
+	"canable"
+	"canalyze"
+	"cannette"
+	"cantact"
+	"falcan"
+	"usb2can"
+)
+set(TGTF072_LIST
+	"CANable_MKS"
+	"CONVERTDEVICE_xCAN"
+	"DSD_TECH_SH_C30A"
+	"FYSETC_UCAN"
+	"can_module_com_classic"
+	"candleLight"
+)
+set(TGTF407_LIST
+	"STM32F4_DevBoard"
+)
+set(TGTG0B1_LIST
+	"CONVERTDEVICE_xCANFD"
+	"budgetcan"
+)
 
 foreach (TGTNAME IN LISTS TGTF042_LIST)
 	option(BUILD_${TGTNAME} "Build firmware for \"${TGTNAME}\" (default=yes)" ON)

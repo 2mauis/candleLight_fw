@@ -33,6 +33,10 @@ THE SOFTWARE.
 const struct gs_device_bt_const_extended CAN_btconst_ext;
 #endif
 
+#ifndef CONFIG_CAN_FILTER
+const struct gs_device_filter_info CAN_filter_info;
+#endif
+
 bool can_check_bittiming_ok(const struct can_bittiming_const *btc,
 							const struct gs_device_bittiming *timing)
 {
@@ -53,6 +57,13 @@ bool can_check_bittiming_ok(const struct can_bittiming_const *btc,
 
 	return true;
 }
+
+#ifdef CONFIG_CAN_FILTER
+bool can_check_filter_ok(const struct gs_device_filter *filter)
+{
+	return filter->info.dev == CAN_filter_info.dev;
+}
+#endif
 
 void CAN_SendFrame(USBD_GS_CAN_HandleTypeDef *hcan, can_data_t *channel)
 {
@@ -152,7 +163,7 @@ void CAN_HandleError(USBD_GS_CAN_HandleTypeDef *hcan, can_data_t *channel)
 
 	struct gs_host_frame *frame = &frame_object->frame;
 	frame->classic_can_ts->timestamp_us = timer_get();
-	frame->channel = channel->nr;
+	frame->channel = can_channel_get_nr(channel);
 
 	if (can_parse_error_status(channel, frame, can_err)) {
 		list_add_tail_locked(&frame_object->list, &hcan->list_to_host);
