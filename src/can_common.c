@@ -40,6 +40,10 @@ const struct gs_device_filter_info CAN_filter_info;
 bool can_check_bittiming_ok(const struct can_bittiming_const *btc,
 							const struct gs_device_bittiming *timing)
 {
+	/* Guard against uint32_t overflow before adding the two fields. */
+	if (timing->prop_seg > UINT32_MAX - timing->phase_seg1)
+		return false;
+
 	const uint32_t tseg1 = timing->prop_seg + timing->phase_seg1;
 
 	if (tseg1 < btc->tseg1_min ||
