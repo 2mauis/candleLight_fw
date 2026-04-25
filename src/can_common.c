@@ -36,8 +36,8 @@ const struct gs_device_bt_const_extended CAN_btconst_ext;
 bool can_check_bittiming_ok(const struct can_bittiming_const *btc,
 							const struct gs_device_bittiming *timing)
 {
-	/* Validate individual fields before adding to avoid uint32_t overflow. */
-	if (timing->prop_seg > btc->tseg1_max || timing->phase_seg1 > btc->tseg1_max)
+	/* Guard against uint32_t overflow before adding the two fields. */
+	if (timing->prop_seg > UINT32_MAX - timing->phase_seg1)
 		return false;
 
 	const uint32_t tseg1 = timing->prop_seg + timing->phase_seg1;
