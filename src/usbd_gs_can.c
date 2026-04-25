@@ -31,15 +31,16 @@ THE SOFTWARE.
 #include "can_common.h"
 #include "compiler.h"
 #include "config.h"
+#include "dfu.h"
 #include "gpio.h"
 #include "gs_usb.h"
-#include "hal_include.h"
 #include "led.h"
 #include "timer.h"
 #include "usbd_core.h"
 #include "usbd_ctlreq.h"
 #include "usbd_def.h"
 #include "usbd_desc.h"
+#include "usbd_dfu.h"
 #include "usbd_gs_can.h"
 #include "usbd_ioreq.h"
 #include "util.h"
@@ -226,7 +227,7 @@ static const struct gs_device_config USBD_GS_CAN_dconf = {
 static inline uint8_t USBD_GS_CAN_PrepareReceive(USBD_HandleTypeDef *pdev)
 {
 	USBD_GS_CAN_HandleTypeDef *hcan = (USBD_GS_CAN_HandleTypeDef*)pdev->pClassData;
-	struct gs_host_frame *frame = &hcan->from_host_buf->frame;
+	struct gs_host_frame *frame = &hcan->from_host_buf[0]->frame;
 	uint16_t size;
 
 	if (IS_ENABLED(CONFIG_CANFD)) {
@@ -263,27 +264,30 @@ static uint8_t USBD_GS_CAN_DeInit(USBD_HandleTypeDef *pdev, uint8_t cfgidx)
 
 static uint8_t USBD_GS_CAN_DFU_Request(USBD_HandleTypeDef *pdev, USBD_SetupReqTypedef *req)
 {
-	USBD_GS_CAN_HandleTypeDef *hcan = (USBD_GS_CAN_HandleTypeDef*) pdev->pClassData;
-	switch (req->bRequest) {
+	USBD_GS_CAN_HandleTypeDef *hcan = pdev->pClassData;
+	union ep0 *ep0 = &hcan->ep0;
 
-		case 0: // DETACH request
+	switch (req->bRequest) {
+		case USB_DFU_REQ_DETACH:
 			hcan->dfu_detach_requested = true;
 			break;
+		case USB_DFU_REQ_GETSTATUS: {
+			struct dfu_status *status = &ep0->dfu_status;
 
-		case 3: // GET_STATUS request
-			hcan->ep0_buf[0] = 0x00; // bStatus: 0x00 == OK
-			hcan->ep0_buf[1] = 0x00; // bwPollTimeout
-			hcan->ep0_buf[2] = 0x00;
-			hcan->ep0_buf[3] = 0x00;
-			hcan->ep0_buf[4] = 0x00; // bState: appIDLE
-			hcan->ep0_buf[5] = 0xFF; // status string descriptor index
-			USBD_CtlSendData(pdev, hcan->ep0_buf, 6);
+			status->status = ERR_OK;
+			status->poll_timeout[0] = 0x0;
+			status->poll_timeout[1] = 0x0;
+			status->poll_timeout[2] = 0x0;
+			status->state = APP_IDLE;
+			status->stringidx = 0xff; // status string descriptor index
+
+			USBD_CtlSendData(pdev, ep0->buf, sizeof(ep0->dfu_status));
 			break;
-
+		}
 		default:
 			USBD_CtlError(pdev, req);
-
 	}
+
 	return USBD_OK;
 }
 
@@ -300,7 +304,7 @@ static can_data_t *USBD_GS_CAN_GetChannel(USBD_GS_CAN_HandleTypeDef *hcan,
 static uint8_t USBD_GS_CAN_Config_Request(USBD_HandleTypeDef *pdev, USBD_SetupReqTypedef *req)
 {
 	USBD_GS_CAN_HandleTypeDef *hcan = (USBD_GS_CAN_HandleTypeDef*) pdev->pClassData;
-	struct gs_device_termination_state term_state;
+	union ep0 *ep0 = &hcan->ep0;
 	can_data_t *channel = NULL;
 	const void *src = NULL;
 	size_t len;
@@ -331,16 +335,32 @@ static uint8_t USBD_GS_CAN_Config_Request(USBD_HandleTypeDef *pdev, USBD_SetupRe
 		}
 	}
 
+	if (!IS_ENABLED(CONFIG_TERMINATION)) {
+		switch (req->bRequest) {
+			case GS_USB_BREQ_SET_TERMINATION:
+			case GS_USB_BREQ_GET_TERMINATION:
+				goto out_fail;
+		}
+	}
+
+	if (!IS_ENABLED(CONFIG_CAN_FILTER)) {
+		switch (req->bRequest) {
+			case GS_USB_BREQ_SET_FILTER:
+			case GS_USB_BREQ_GET_FILTER:
+				goto out_fail;
+		}
+	}
+
 	switch (req->bRequest) {
 		// Host -> Device
 		case GS_USB_BREQ_HOST_FORMAT:
-			len = sizeof(struct gs_host_config);
+			len = sizeof(ep0->config);
 			break;
 		case GS_USB_BREQ_BITTIMING:
-			len = sizeof(struct gs_device_bittiming);
+			len = sizeof(ep0->bittiming);
 			break;
 		case GS_USB_BREQ_MODE:
-			len = sizeof(struct gs_device_mode);
+			len = sizeof(ep0->mode);
 			break;
 		case GS_USB_BREQ_BT_CONST:
 			src = &CAN_btconst;
@@ -355,35 +375,30 @@ static uint8_t USBD_GS_CAN_Config_Request(USBD_HandleTypeDef *pdev, USBD_SetupRe
 			len = sizeof(hcan->sof_timestamp_us);
 			break;
 		case GS_USB_BREQ_IDENTIFY:
-			len = sizeof(struct gs_identify_mode);
+			len = sizeof(ep0->identify_mode);
 			break;
 		case GS_USB_BREQ_DATA_BITTIMING:
-			len = sizeof(struct gs_device_bittiming);
+			len = sizeof(ep0->bittiming);
 			break;
 		case GS_USB_BREQ_BT_CONST_EXT:
 			src = &CAN_btconst_ext;
 			len = sizeof(CAN_btconst_ext);
 			break;
 		case GS_USB_BREQ_SET_TERMINATION:
-			if (get_term(req->wValue) == GS_CAN_TERMINATION_UNSUPPORTED) {
-				goto out_fail;
-			}
-
-			len = sizeof(struct gs_device_termination_state);
+			len = sizeof(ep0->term_state);
 			break;
-		case GS_USB_BREQ_GET_TERMINATION: {
-			enum gs_can_termination_state state;
-
-			state = get_term(req->wValue);
-			if (state == GS_CAN_TERMINATION_UNSUPPORTED) {
-				goto out_fail;
-			}
-
-			term_state.state = state;
-			src = &term_state;
-			len = sizeof(term_state);
+		case GS_USB_BREQ_GET_TERMINATION:
+			ep0->term_state.state = get_term(channel);
+			src = &ep0->term_state;
+			len = sizeof(ep0->term_state);
 			break;
-		}
+		case GS_USB_BREQ_SET_FILTER:
+			len = sizeof(ep0->filter);
+			break;
+		case GS_USB_BREQ_GET_FILTER:
+			src = &CAN_filter_info;
+			len = sizeof(CAN_filter_info);
+			break;
 		default:
 			goto out_fail;
 	}
@@ -399,12 +414,13 @@ static uint8_t USBD_GS_CAN_Config_Request(USBD_HandleTypeDef *pdev, USBD_SetupRe
 		case GS_USB_BREQ_IDENTIFY:
 		case GS_USB_BREQ_DATA_BITTIMING:
 		case GS_USB_BREQ_SET_TERMINATION:
-			if (req->wLength > sizeof(hcan->ep0_buf)) {
+		case GS_USB_BREQ_SET_FILTER:
+			if (req->wLength > sizeof(*ep0)) {
 				goto out_fail;
 			}
 
 			hcan->last_setup_request = *req;
-			USBD_CtlPrepareRx(pdev, hcan->ep0_buf, req->wLength);
+			USBD_CtlPrepareRx(pdev, hcan->ep0.buf, req->wLength);
 			break;
 
 		// Device -> Host
@@ -413,6 +429,7 @@ static uint8_t USBD_GS_CAN_Config_Request(USBD_HandleTypeDef *pdev, USBD_SetupRe
 		case GS_USB_BREQ_TIMESTAMP:
 		case GS_USB_BREQ_BT_CONST_EXT:
 		case GS_USB_BREQ_GET_TERMINATION:
+		case GS_USB_BREQ_GET_FILTER:
 			USBD_CtlSendData(pdev, (uint8_t *)src, len);
 			break;
 		default:
@@ -481,6 +498,7 @@ static uint8_t USBD_GS_CAN_EP0_RxReady(USBD_HandleTypeDef *pdev) {
 	USBD_GS_CAN_HandleTypeDef *hcan = (USBD_GS_CAN_HandleTypeDef*) pdev->pClassData;
 	can_data_t *channel = NULL;
 	USBD_SetupReqTypedef *req = &hcan->last_setup_request;
+	const union ep0 *ep0 = &hcan->ep0;
 
 	/*
 	 * The control messages GS_USB_BREQ_HOST_FORMAT and
@@ -491,6 +509,28 @@ static uint8_t USBD_GS_CAN_EP0_RxReady(USBD_HandleTypeDef *pdev) {
 	if (!(req->bRequest == GS_USB_BREQ_HOST_FORMAT ||
 		  req->bRequest == GS_USB_BREQ_DEVICE_CONFIG))
 		channel = USBD_GS_CAN_GetChannel(hcan, req->wValue);
+
+	if (!IS_ENABLED(CONFIG_CANFD)) {
+		switch (req->bRequest) {
+			case GS_USB_BREQ_DATA_BITTIMING:
+				goto out_fail;
+		}
+	}
+
+	if (!IS_ENABLED(CONFIG_TERMINATION)) {
+		switch (req->bRequest) {
+			case GS_USB_BREQ_SET_TERMINATION:
+			case GS_USB_BREQ_GET_TERMINATION:
+				goto out_fail;
+		}
+	}
+
+	if (!IS_ENABLED(CONFIG_CAN_FILTER)) {
+		switch (req->bRequest) {
+			case GS_USB_BREQ_SET_FILTER:
+				goto out_fail;
+		}
+	}
 
 	switch (req->bRequest) {
 		case GS_USB_BREQ_HOST_FORMAT:
@@ -506,7 +546,7 @@ static uint8_t USBD_GS_CAN_EP0_RxReady(USBD_HandleTypeDef *pdev) {
 			break;
 
 		case GS_USB_BREQ_BITTIMING: {
-			const struct gs_device_bittiming *timing = (struct gs_device_bittiming *)hcan->ep0_buf;
+			const struct gs_device_bittiming *timing = &ep0->bittiming;
 
 			if (!can_check_bittiming_ok(&CAN_btconst.btc, timing))
 				goto out_fail;
@@ -515,27 +555,23 @@ static uint8_t USBD_GS_CAN_EP0_RxReady(USBD_HandleTypeDef *pdev) {
 			break;
 		}
 		case GS_USB_BREQ_MODE: {
-			struct gs_device_mode *mode;
-
-			mode = (struct gs_device_mode*)hcan->ep0_buf;
+			const struct gs_device_mode *mode = &ep0->mode;
 
 			if (mode->mode == GS_CAN_MODE_RESET) {
 				can_disable(channel);
 				led_set_mode(&channel->leds, LED_MODE_OFF);
 			} else if (mode->mode == GS_CAN_MODE_START) {
-				hcan->timestamps_enabled = (mode->flags & GS_CAN_MODE_HW_TIMESTAMP) != 0;
-				hcan->pad_pkts_to_max_pkt_size = (mode->flags & GS_CAN_MODE_PAD_PKTS_TO_MAX_PKT_SIZE) != 0;
+				hcan->feature = mode->feature;
 
-				can_enable(channel, mode->flags);
+				can_enable(channel, mode->feature);
 
 				led_set_mode(&channel->leds, LED_MODE_NORMAL);
 			}
 			break;
 		}
 		case GS_USB_BREQ_IDENTIFY: {
-			struct gs_identify_mode *imode;
+			const struct gs_identify_mode *imode = &ep0->identify_mode;
 
-			imode = (struct gs_identify_mode *)hcan->ep0_buf;
 			if (imode->mode) {
 				led_run_sequence(&channel->leds, led_identify_seq, -1);
 			} else {
@@ -545,7 +581,7 @@ static uint8_t USBD_GS_CAN_EP0_RxReady(USBD_HandleTypeDef *pdev) {
 			break;
 		}
 		case GS_USB_BREQ_DATA_BITTIMING: {
-			const struct gs_device_bittiming *timing = (struct gs_device_bittiming *)hcan->ep0_buf;
+			const struct gs_device_bittiming *timing = &ep0->bittiming;
 
 			if (!can_check_bittiming_ok(&CAN_btconst_ext.dbtc, timing))
 				goto out_fail;
@@ -554,14 +590,18 @@ static uint8_t USBD_GS_CAN_EP0_RxReady(USBD_HandleTypeDef *pdev) {
 			break;
 		}
 		case GS_USB_BREQ_SET_TERMINATION: {
-			if (get_term(req->wValue) != GS_CAN_TERMINATION_UNSUPPORTED) {
-				struct gs_device_termination_state *term_state;
+			const struct gs_device_termination_state *term_state = &ep0->term_state;
 
-				term_state = (struct gs_device_termination_state *)hcan->ep0_buf;
-				if (set_term(req->wValue, term_state->state) == GS_CAN_TERMINATION_UNSUPPORTED) {
-					USBD_CtlError(pdev, req);
-				}
-			}
+			set_term(channel, term_state->state);
+			break;
+		}
+		case GS_USB_BREQ_SET_FILTER: {
+			const struct gs_device_filter *filter = &ep0->filter;
+
+			if (!can_check_filter_ok(filter) || can_is_enabled(channel))
+				goto out_fail;
+
+			can_set_filter(channel, filter);
 			break;
 		}
 		default:
@@ -587,53 +627,101 @@ static uint8_t USBD_GS_CAN_DataIn(USBD_HandleTypeDef *pdev, uint8_t epnum) {
 	return USBD_OK;
 }
 
+// Prefill the buffers from RX from host.
+// Return true if pre-allocated buffer list buffer list
+// was changed and is now ready, meaning and RX can be
+// re-enabled, false otherwise.
+// Must be called with IRQ disabled.
+static bool USBD_GS_Prefill_RX_Buffers(USBD_GS_CAN_HandleTypeDef *hcan)
+{
+	unsigned i;
+	bool changed;
+
+	changed = false;
+	for (i = 0; i < ARRAY_SIZE(hcan->from_host_buf); ++i) {
+		if (hcan->from_host_buf[i])
+			continue;
+
+		hcan->from_host_buf[i] = list_first_entry_or_null(&hcan->list_frame_pool,
+														  struct gs_host_frame_object,
+														  list);
+		if (!hcan->from_host_buf[i])
+			return false;
+
+		list_del(&hcan->from_host_buf[i]->list);
+
+		changed = true;
+	}
+
+	return changed;
+}
+
 // Note that the return value is completely ignored by the stack.
 static uint8_t USBD_GS_CAN_DataOut(USBD_HandleTypeDef *pdev, uint8_t epnum) {
 	USBD_GS_CAN_HandleTypeDef *hcan = (USBD_GS_CAN_HandleTypeDef*)pdev->pClassData;
 	can_data_t *channel;
 
+	/* If we do not have a valid incoming frame pointer, something broke. */
+	assert_basic (hcan->from_host_buf[0]);
+
 	uint32_t rxlen = USBD_LL_GetRxDataSize(pdev, epnum);
-	if (rxlen < (struct_size(&hcan->from_host_buf->frame, classic_can, 1))) {
+	if (rxlen < (struct_size(&hcan->from_host_buf[0]->frame, classic_can, 1))) {
 		// Invalid frame length, just ignore it and receive into the same buffer
 		// again next time.
 		goto out_prepare_receive;
 	}
 
-	channel = USBD_GS_CAN_GetChannel(hcan, hcan->from_host_buf->frame.channel);
+	channel = USBD_GS_CAN_GetChannel(hcan, hcan->from_host_buf[0]->frame.channel);
 	if (!channel) {
 		goto out_prepare_receive;
 	}
 
 	if (IS_ENABLED(CONFIG_CANFD) &&
-		hcan->from_host_buf->frame.flags & GS_CAN_FLAG_FD &&
-		rxlen < struct_size(&hcan->from_host_buf->frame, canfd, 1)) {
+		hcan->from_host_buf[0]->frame.flags & GS_CAN_FLAG_FD &&
+		rxlen < struct_size(&hcan->from_host_buf[0]->frame, canfd, 1)) {
 		goto out_prepare_receive;
 	}
 
 	bool was_irq_enabled = disable_irq();
 	// Enqueue the frame we just received.
-	list_add_tail(&hcan->from_host_buf->list, &channel->list_from_host);
+	list_add_tail(&hcan->from_host_buf[0]->list, &channel->list_from_host);
 
-	// Grab a buffer for the next frame from the pool.
-	hcan->from_host_buf = list_first_entry_or_null(&hcan->list_frame_pool,
-												   struct gs_host_frame_object,
-												   list);
-	if (hcan->from_host_buf) {
-		list_del(&hcan->from_host_buf->list);
+	int last;
+	for (last = 0; last < (int)ARRAY_SIZE(hcan->from_host_buf) - 1; ++last)
+		hcan->from_host_buf[last] = hcan->from_host_buf[last + 1];
+	hcan->from_host_buf[last] = NULL;
+
+	bool rx_ready = USBD_GS_Prefill_RX_Buffers(hcan);
+
+	if (rx_ready) {
 		restore_irq(was_irq_enabled);
 
-		// We got a buffer! Get ready to receive from the USB host into it.
+		// All RX buffers are ready. Enable RX.
 		USBD_GS_CAN_PrepareReceive(pdev);
 	} else {
 		restore_irq(was_irq_enabled);
 
-		// gs_can has no way to drop packets. If we just drop this one, gs_can
-		// will fill up its queue of packets awaiting ACKs and then hang. Instead,
-		// wait to call PrepareReceive until we have a frame to receive into.
+#if defined(USB) || defined(USB_DRD_FS)
+		// Not all RX buffers are ready. We got enough in the
+		// pre-allocated reserve to ensure callbacks which are going
+		// to be called due to USB frames being received into double
+		// buffer, but disable further RX. If double buffer not in use,
+		// RX would have already been disabled by USB HW.
+		USBD_GS_CAN_PrepareReceive(pdev);
+		PCD_SET_EP_RX_STATUS(((PCD_HandleTypeDef*)pdev->pData)->Instance,
+							 GSUSB_ENDPOINT_OUT,
+							 USB_EP_RX_NAK);
+#endif
 	}
 	return USBD_OK;
 
 out_prepare_receive:
+	// We can not unconditionally re-enable RX if the pre-allocated
+	// buffers are not fully ready.
+	for (unsigned i = 0; i < ARRAY_SIZE(hcan->from_host_buf); ++i) {
+		if (!hcan->from_host_buf[i])
+			return USBD_OK;
+	}
 	USBD_GS_CAN_PrepareReceive(pdev);
 	return USBD_OK;
 }
@@ -734,23 +822,15 @@ void USBD_GS_CAN_ReceiveFromHost(USBD_HandleTypeDef *pdev)
 	USBD_GS_CAN_HandleTypeDef *hcan = (USBD_GS_CAN_HandleTypeDef*)pdev->pClassData;
 
 	bool was_irq_enabled = disable_irq();
-	if (hcan->from_host_buf) {
-		restore_irq(was_irq_enabled);
-		return;
-	}
 
-	hcan->from_host_buf = list_first_entry_or_null(&hcan->list_frame_pool,
-												   struct gs_host_frame_object,
-												   list);
-	if (!hcan->from_host_buf) {
-		restore_irq(was_irq_enabled);
-		return;
-	}
+	// Reserve the multiple RX buffers we need to ensure no frame loss
+	// with OUT endpoint double-buffering before (re)starting the RX. */
+	bool rx_ready = USBD_GS_Prefill_RX_Buffers(hcan);
 
-	list_del(&hcan->from_host_buf->list);
+	if (rx_ready)
+		USBD_GS_CAN_PrepareReceive(pdev);
+
 	restore_irq(was_irq_enabled);
-
-	USBD_GS_CAN_PrepareReceive(pdev);
 }
 
 static uint8_t USBD_GS_CAN_Transmit(USBD_HandleTypeDef *pdev, uint8_t *buf, uint16_t len)
@@ -772,13 +852,13 @@ static uint8_t USBD_GS_CAN_SendFrame(USBD_HandleTypeDef *pdev, struct gs_host_fr
 
 	if (IS_ENABLED(CONFIG_CANFD) &&
 		frame->flags & GS_CAN_FLAG_FD) {
-		if (hcan->timestamps_enabled) {
+		if (hcan->feature & GS_CAN_FEATURE_HW_TIMESTAMP) {
 			len = struct_size(frame, canfd_ts, 1);
 		} else {
 			len = struct_size(frame, canfd, 1);
 		}
 	} else {
-		if (hcan->timestamps_enabled) {
+		if (hcan->feature & GS_CAN_FEATURE_HW_TIMESTAMP) {
 			len = struct_size(frame, classic_can_ts, 1);
 		} else {
 			len = struct_size(frame, classic_can, 1);
@@ -797,7 +877,7 @@ static uint8_t USBD_GS_CAN_SendFrame(USBD_HandleTypeDef *pdev, struct gs_host_fr
 	 * packet of 64 byte), so don't do any padding for CAN-FD frames
 	 * for now.
 	 */
-	if (hcan->pad_pkts_to_max_pkt_size &&
+	if (hcan->feature & GS_CAN_FEATURE_PAD_PKTS_TO_MAX_PKT_SIZE &&
 		!((IS_ENABLED(CONFIG_CANFD) && frame->flags & GS_CAN_FLAG_FD))) {
 		memcpy(buf, frame, len);
 
@@ -836,7 +916,7 @@ void USBD_GS_CAN_SendToHost(USBD_HandleTypeDef *pdev)
 		return;
 
 	was_irq_enabled = disable_irq();
-	list_add(&hcan->to_host_buf->list, &hcan->list_frame_pool);
+	list_add(&hcan->to_host_buf->list, &hcan->list_to_host);
 	hcan->to_host_buf = NULL;
 	restore_irq(was_irq_enabled);
 }

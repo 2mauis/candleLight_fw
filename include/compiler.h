@@ -42,6 +42,10 @@
 #define __packed __attribute__((__packed__))
 #endif
 
+#ifndef __maybe_unused
+#define __maybe_unused __attribute__((__unused__))
+#endif
+
 #if __has_attribute(__fallthrough__)
 #define fallthrough __attribute__((__fallthrough__))
 #else
@@ -93,16 +97,29 @@
 			_t _n[0]; \
 		}
 
-#define min(x, y)			((x) < (y) ? (x) : (y))
-#define max(x, y)			((x) > (y) ? (x) : (y))
+#ifndef __struct_group
+#define __struct_group(_tag, _name, _attrs, _members ...) \
+		union { \
+			struct { _members } _attrs; \
+			struct _tag { _members } _attrs _name; \
+		} _attrs
+#endif
 
-#define min3(a, b, c)		min(a, min(b, c))
-#define max3(a, b, c)		max(a, max(b, c))
+#ifndef struct_group
+#define struct_group(_name, _members ...) \
+		__struct_group(/* no tag */, _name, /* no attrs */, _members)
+#endif
 
-#define min4(a, b, c, d)	min(min(a, b), min(c, d))
-#define max4(a, b, c, d)	max(max(a, b), max(b, d))
+#ifndef struct_group_tagged
+#define struct_group_tagged(_tag, _name, _members ...) \
+		__struct_group(_tag, _name, /* no attrs */, _members)
+#endif
 
-#define min5(a, b, c, d, e) min3(min(a, b), min(c, d), e)
-#define max5(a, b, c, d, e) max3(max(a, b), max(b, d), e)
+#define min(x, y) ((x) < (y) ? (x) : (y))
+#define max(x, y) ((x) > (y) ? (x) : (y))
+
+#undef static_assert
+#define static_assert(x, ...)		 __static_assert(x, ## __VA_ARGS__, #x)
+#define __static_assert(x, msg, ...) _Static_assert(x, msg)
 
 #endif /* _LINUXKPI_LINUX_COMPILER_H_ */

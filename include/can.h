@@ -36,21 +36,28 @@ THE SOFTWARE.
 #include "list.h"
 
 typedef struct {
+#if defined (CONFIG_BXCAN)
 	CAN_TypeDef *instance;
+#endif
 	struct list_head list_from_host;
 	led_data_t leds;
 	uint32_t reg_esr_old;
-	uint16_t brp;
-	uint8_t phase_seg1;
-	uint8_t phase_seg2;
-	uint8_t sjw;
+#if defined (CONFIG_BXCAN)
+	struct gs_device_filter filter;
+	uint32_t btr;
+#endif
+#if (NUM_CAN_CHANNEL > 1)
 	uint8_t nr;
+#endif
 } can_data_t;
 
 extern const struct gs_device_bt_const CAN_btconst;
 extern const struct gs_device_bt_const_extended CAN_btconst_ext;
+extern const struct gs_device_filter_info CAN_filter_info;
 
-void can_init(can_data_t *channel, CAN_TypeDef *instance);
+struct board_channel_config;
+
+void can_init(can_data_t *channel, const struct board_channel_config *config);
 void can_set_bittiming(can_data_t *channel, const struct gs_device_bittiming *timing);
 
 #ifdef CONFIG_CANFD
@@ -63,6 +70,16 @@ static inline bool can_set_data_bittiming(can_data_t *channel,
 	(void)timing;
 
 	return false;
+}
+#endif
+
+#ifdef CONFIG_CAN_FILTER
+void can_set_filter(can_data_t *channel, const struct gs_device_filter *filter);
+#else
+static inline void can_set_filter(can_data_t *channel, const struct gs_device_filter *filter)
+{
+	(void)channel;
+	(void)filter;
 }
 #endif
 

@@ -24,12 +24,12 @@
 
  */
 
+#include "board.h"
 #include "can.h"
+#include "can_common.h"
 #include "config.h"
 #include "device.h"
-#include "gpio.h"
 #include "gs_usb.h"
-#include "hal_include.h"
 #include "timer.h"
 
 const struct gs_device_bt_const CAN_btconst = {
@@ -39,11 +39,13 @@ const struct gs_device_bt_const CAN_btconst = {
 		GS_CAN_FEATURE_ONE_SHOT |
 		GS_CAN_FEATURE_HW_TIMESTAMP |
 		GS_CAN_FEATURE_IDENTIFY |
-		GS_CAN_FEATURE_PAD_PKTS_TO_MAX_PKT_SIZE
-#ifdef TERM_Pin
-		| GS_CAN_FEATURE_TERMINATION
+		GS_CAN_FEATURE_PAD_PKTS_TO_MAX_PKT_SIZE |
+		(IS_ENABLED(CONFIG_TERMINATION) ?
+		 GS_CAN_FEATURE_TERMINATION : 0) |
+#ifdef CONFIG_CAN_FILTER
+		GS_CAN_FEATURE_FILTER |
 #endif
-	,
+		0,
 	.fclk_can = CAN_CLOCK_SPEED,
 	.btc = {
 		.tseg1_min = 1,
@@ -56,6 +58,12 @@ const struct gs_device_bt_const CAN_btconst = {
 		.brp_inc = 1,
 	},
 };
+
+#ifdef CONFIG_CAN_FILTER
+const struct gs_device_filter_info CAN_filter_info = {
+	.dev = GS_DEVICE_FILTER_DEV_BXCAN,
+};
+#endif
 
 // The STM32F0 only has one CAN interface, define it as CAN1 as
 // well, so it doesn't need to be handled separately.
@@ -81,22 +89,65 @@ static void rcc_reset(CAN_TypeDef *instance)
 #endif
 }
 
-void can_init(can_data_t *channel, CAN_TypeDef *instance)
+void can_init(can_data_t *channel, const struct board_channel_config *channel_config)
 {
-	device_can_init(channel, instance);
+	struct gs_device_filter_bxcan *filter = &channel->filter.bxcan;
+
+	device_can_init(channel, channel_config);
+
+	filter->fs1r = 0x1;     // 32-bit for filter bank 0
+	filter->fm1r = 0x0;     // Mask mode for filter 0
+	filter->ffa1r = 0x0;    // Assign to FIFO 0
+	filter->fa1r = 0x1;     // Enable filter bank 0
 }
 
 void can_set_bittiming(can_data_t *channel, const struct gs_device_bittiming *timing)
 {
-	const uint8_t tseg1 = timing->prop_seg + timing->phase_seg1;
-
-	channel->brp = timing->brp;
-	channel->phase_seg1 = tseg1;
-	channel->phase_seg2 = timing->phase_seg2;
-	channel->sjw = timing->sjw;
+	channel->btr = FIELD_PREP(CAN_BTR_SJW, timing->sjw - 1) |
+				   FIELD_PREP(CAN_BTR_TS2, timing->phase_seg2 - 1) |
+				   FIELD_PREP(CAN_BTR_TS1, timing->prop_seg + timing->phase_seg1 - 1) |
+				   FIELD_PREP(CAN_BTR_BRP, timing->brp - 1);
 }
 
-void can_enable(can_data_t *channel, uint32_t mode)
+#ifdef CONFIG_CAN_FILTER
+void can_set_filter(can_data_t *channel, const struct gs_device_filter *filter)
+{
+	channel->filter.bxcan = filter->bxcan;
+}
+#endif
+
+static bool can_apply_filter(const can_data_t *channel)
+{
+	const struct gs_device_filter_bxcan *filter = &channel->filter.bxcan;
+	CAN_TypeDef *can = channel->instance;
+
+	// disable filter configuration
+	can->FMR |= CAN_FMR_FINIT;
+
+	// use all filter banks for CAN1
+	can->FMR &= ~CAN_FMR_CAN2SB;
+
+	// disable filters
+	can->FA1R = 0x0;
+
+	can->FS1R = filter->fs1r;
+	can->FM1R = filter->fm1r;
+	can->FFA1R = filter->ffa1r;
+
+	for (uint32_t bank = 0; bank < ARRAY_SIZE(filter->fr1); bank++) {
+		can->sFilterRegister[bank].FR1 = filter->fr1[bank];
+		can->sFilterRegister[bank].FR2 = filter->fr2[bank];
+	}
+
+	can->FA1R = filter->fa1r;
+
+	// exit filter configuration mode
+	can->FMR &= ~CAN_FMR_FINIT;
+
+	return true;
+}
+
+void can_enable(can_data_t *channel, uint32_t feature)
 {
 	CAN_TypeDef *can = channel->instance;
 
@@ -104,20 +155,17 @@ void can_enable(can_data_t *channel, uint32_t mode)
 				   | CAN_MCR_ABOM
 				   | CAN_MCR_TXFP;
 
-	if (mode & GS_CAN_MODE_ONE_SHOT) {
+	if (feature & GS_CAN_FEATURE_ONE_SHOT) {
 		mcr |= CAN_MCR_NART;
 	}
 
-	uint32_t btr = ((uint32_t)(channel->sjw-1)) << 24
-				   | ((uint32_t)(channel->phase_seg1-1)) << 16
-				   | ((uint32_t)(channel->phase_seg2-1)) << 20
-				   | (channel->brp - 1);
+	uint32_t btr = channel->btr;
 
-	if (mode & GS_CAN_MODE_LISTEN_ONLY) {
+	if (feature & GS_CAN_FEATURE_LISTEN_ONLY) {
 		btr |= CAN_MODE_SILENT;
 	}
 
-	if (mode & GS_CAN_MODE_LOOP_BACK) {
+	if (feature & GS_CAN_FEATURE_LOOP_BACK) {
 		btr |= CAN_MODE_LOOPBACK;
 	}
 
@@ -135,32 +183,19 @@ void can_enable(can_data_t *channel, uint32_t mode)
 	can->MCR = mcr;
 	can->BTR = btr;
 
+	can_apply_filter(channel);
+
 	can->MCR &= ~CAN_MCR_INRQ;
 	while ((can->MSR & CAN_MSR_INAK) != 0);
 
-	uint32_t filter_bit = 0x00000001;
-	can->FMR |= CAN_FMR_FINIT;
-	can->FMR &= ~CAN_FMR_CAN2SB;
-	can->FA1R &= ~filter_bit;        // disable filter
-	can->FS1R |= filter_bit;         // set to single 32-bit filter mode
-	can->FM1R &= ~filter_bit;        // set filter mask mode for filter 0
-	can->sFilterRegister[0].FR1 = 0;     // filter ID = 0
-	can->sFilterRegister[0].FR2 = 0;     // filter Mask = 0
-	can->FFA1R &= ~filter_bit;       // assign filter 0 to FIFO 0
-	can->FA1R |= filter_bit;         // enable filter
-	can->FMR &= ~CAN_FMR_FINIT;
-
-#ifdef nCANSTBY_Pin
-	HAL_GPIO_WritePin(nCANSTBY_Port, nCANSTBY_Pin, !GPIO_INIT_STATE(nCANSTBY_Active_High));
-#endif
+	board_phy_power_set(channel, true);
 }
 
 void can_disable(can_data_t *channel)
 {
 	CAN_TypeDef *can = channel->instance;
-#ifdef nCANSTBY_Pin
-	HAL_GPIO_WritePin(nCANSTBY_Port, nCANSTBY_Pin, GPIO_INIT_STATE(nCANSTBY_Active_High));
-#endif
+
+	board_phy_power_set(channel, false);
 	can->MCR |= CAN_MCR_INRQ;     // send can controller into initialization mode
 }
 
@@ -196,7 +231,7 @@ bool can_receive(can_data_t *channel, struct gs_host_frame *rx_frame)
 		}
 
 		rx_frame->can_dlc = fifo->RDTR & CAN_RDT0R_DLC;
-		rx_frame->channel = channel->nr;
+		rx_frame->channel = can_channel_get_nr(channel);
 		rx_frame->flags = 0;
 
 		rx_frame->classic_can->data[0] = (fifo->RDLR >>  0) & 0xFF;
